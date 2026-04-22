@@ -8,24 +8,25 @@ const uuidv4 = () => uuid.v4();
 async function placeOrder(req, res, next) {
   try {
     const { restaurantSlug, tableId, customerName, customerPhone,
-            items, specialInstructions, couponCode, paymentMethod } = req.body;
+            items, specialInstructions, couponCode } = req.body;
 
     if (!restaurantSlug || !items?.length) throw new AppError('restaurantSlug and items are required', 400);
 
     const restaurant = await queryOne('SELECT id, is_active FROM restaurants WHERE slug = ?', [restaurantSlug]);
     if (!restaurant?.is_active) throw new AppError('Restaurant not found', 404);
 
-    // Resolve tableId: frontend sends table_number from URL, we need the actual row id
+    // Resolve tableId: could be table_number (from URL) or tables_info.id
+    // Try to find the actual table row
     let resolvedTableId = null;
     if (tableId) {
       const tableRow = await queryOne(
-        'SELECT id FROM tables_info WHERE restaurant_id = ? AND table_number = ?',
-        [restaurant.id, String(tableId)]
+        'SELECT id FROM tables_info WHERE restaurant_id = ? AND (id = ? OR table_number = ?) LIMIT 1',
+        [restaurant.id, tableId, String(tableId)]
       );
       resolvedTableId = tableRow?.id || null;
     }
 
-    const itemIds   = items.map(i => i.menuItemId);
+    const itemIds   = items.map(i => Number(i.menuItemId));
     const menuItems = await query(
       `SELECT id, name_en, price, discounted_price, is_available, preparation_time_mins
        FROM menu_items WHERE id IN (${itemIds.map(() => '?').join(',')}) AND restaurant_id = ?`,
@@ -33,14 +34,14 @@ async function placeOrder(req, res, next) {
     );
 
     for (const reqItem of items) {
-      const found = menuItems.find(m => m.id === reqItem.menuItemId);
+      const found = menuItems.find(m => Number(m.id) === Number(reqItem.menuItemId));
       if (!found) throw new AppError(`Menu item ${reqItem.menuItemId} not found`, 400);
       if (!found.is_available) throw new AppError(`"${found.name_en}" is currently unavailable`, 400);
     }
 
     let totalAmount = 0;
     const orderItems = items.map(reqItem => {
-      const menuItem  = menuItems.find(m => m.id === reqItem.menuItemId);
+      const menuItem  = menuItems.find(m => Number(m.id) === Number(reqItem.menuItemId));
       const unitPrice = menuItem.discounted_price || menuItem.price;
       totalAmount += unitPrice * reqItem.quantity;
       return {
@@ -75,15 +76,31 @@ async function placeOrder(req, res, next) {
     const estimatedPrepTime = Math.max(...orderItems.map(i => i.prepTime));
     const orderId           = uuidv4();
 
+    // Check if restaurant uses pay-first mode
+    const restaurantFull = await queryOne(
+      'SELECT id, is_active, pay_first FROM restaurants WHERE id = ?',
+      [restaurant.id]
+    );
+    const payFirst = restaurantFull?.pay_first === 1;
+
+    // Payment method from request
+    const paymentMethod = req.body.paymentMethod || 'counter';
+
+    // For pay-first restaurants, order starts as payment_pending
+    // For counter/cash restaurants, order goes straight to placed
+    const initialPaymentStatus = (payFirst && paymentMethod === 'upi') ? 'pending' : 'pending';
+    const initialStatus = (payFirst && paymentMethod === 'upi') ? 'payment_pending' : 'placed';
+
     await transaction(async (conn) => {
       await conn.execute(
         `INSERT INTO orders
            (id, restaurant_id, table_id, customer_name, customer_phone,
-            total_amount, discount_amount, final_amount, special_instructions, payment_method)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            total_amount, discount_amount, final_amount, special_instructions,
+            payment_method, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [orderId, restaurant.id, resolvedTableId, customerName || 'Guest',
-         customerPhone || null, totalAmount, discountAmount, finalAmount,
-         specialInstructions || null, paymentMethod || 'counter']
+         customerPhone || null, totalAmount, discountAmount, finalAmount, specialInstructions || null,
+         paymentMethod, initialStatus]
       );
       for (const item of orderItems) {
         await conn.execute(

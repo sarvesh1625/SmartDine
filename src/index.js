@@ -26,6 +26,7 @@ const promotionRoutes  = require('./routes/promotion.routes');
 const superAdminRoutes = require('./routes/superAdmin.routes');
 const billingRoutes    = require('./routes/billing.routes');
 const bookingRoutes    = require('./routes/booking.routes');
+const webhookRoutes    = require('./routes/payment_webhook.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -73,6 +74,7 @@ app.use('/api/v1/feedback',   feedbackRoutes);
 app.use('/api/v1/promotions', promotionRoutes);
 app.use('/api/v1/superadmin', superAdminRoutes);
 app.use('/api/v1/billing',    billingRoutes);
+app.use('/api/v1/webhooks',   webhookRoutes);
 
 // ── 404 & error handling ──────────────────────────────────────────────────────
 app.use(notFound);

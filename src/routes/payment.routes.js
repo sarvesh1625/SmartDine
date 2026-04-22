@@ -81,7 +81,6 @@ router.post('/verify', async (req, res, next) => {
       'SELECT id, final_amount, razorpay_order_id FROM orders WHERE id = ?',
       [orderId]
     );
-
     if (!order) throw new AppError('Order not found', 404);
     if (order.razorpay_order_id !== razorpay_order_id) {
       throw new AppError('Order ID mismatch', 400);
@@ -101,7 +100,6 @@ router.post('/verify', async (req, res, next) => {
 // GET /api/v1/payments/history  [Admin only]
 router.get('/history', authenticate, isAdmin, async (req, res, next) => {
   try {
-    
     const { page = 1, limit = 20, from, to } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 

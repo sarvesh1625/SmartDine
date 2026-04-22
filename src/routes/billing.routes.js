@@ -19,18 +19,13 @@ const razorpay = process.env.RAZORPAY_KEY_ID ? new Razorpay({
 /* ── GET /api/v1/billing/status ── */
 router.get('/status', authenticate, isAdmin, async (req, res, next) => {
   try {
-    // For branches: read plan from parent restaurant
-    const self = await queryOne(
-      'SELECT id, name, plan_type, created_at, parent_restaurant_id, DATE_ADD(created_at, INTERVAL 15 DAY) AS trial_ends_at FROM restaurants WHERE id = ?',
+    const restaurant = await queryOne(
+      `SELECT id, name, plan_type, created_at,
+              DATE_ADD(created_at, INTERVAL 15 DAY) AS trial_ends_at
+       FROM restaurants WHERE id = ?`,
       [req.restaurantId]
     );
-    if (!self) throw new AppError('Restaurant not found', 404);
-
-    // If this is a branch, use parent's plan
-    const rootId     = self.parent_restaurant_id || self.id;
-    const restaurant = self.parent_restaurant_id
-      ? await queryOne('SELECT id, name, plan_type, created_at, DATE_ADD(created_at, INTERVAL 15 DAY) AS trial_ends_at FROM restaurants WHERE id = ?', [rootId])
-      : self;
+    if (!restaurant) throw new AppError('Restaurant not found', 404);
 
     const now           = new Date();
     const trialEndsAt   = restaurant.trial_ends_at ? new Date(restaurant.trial_ends_at) : null;
@@ -39,18 +34,16 @@ router.get('/status', authenticate, isAdmin, async (req, res, next) => {
     const isPaid        = restaurant.plan_type !== 'free';
     const hasAccess     = isPaid || isTrialActive;
 
-    // Get current active subscription from root
+    // Get current active subscription
     const subscription = await queryOne(
       `SELECT * FROM subscriptions WHERE restaurant_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`,
-      [rootId]
+      [req.restaurantId]
     );
 
     res.json({
       success: true,
       data: {
         planType:      restaurant.plan_type,
-        isBranch:      !!self.parent_restaurant_id,
-        rootRestaurantId: rootId,
         trialDaysLeft,
         isTrialActive,
         isPaid,
@@ -76,7 +69,7 @@ router.post('/create-order', authenticate, isAdmin, async (req, res, next) => {
     const order = await razorpay.orders.create({
       amount:   plan.amount,
       currency: 'INR',
-      receipt:  `plan_${req.restaurantId}_${Date.now()}`,
+      receipt:  `plan_${req.restaurantId.slice(0,8)}_${Date.now().toString().slice(-8)}`,
       notes:    { restaurantId: req.restaurantId, plan_type },
     });
 

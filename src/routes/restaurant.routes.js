@@ -329,7 +329,17 @@ router.get('/public/:slug', async (req, res, next) => {
       tableUpiOnly = !!(tableRow?.upi_only);
     }
 
-    res.json({ success: true, data: { ...restaurant, tableUpiOnly } });
+    // Try to get PhonePe config — columns may not exist if migration not run yet
+    let hasMerchant = false;
+    try {
+      const pp = await queryOne(
+        'SELECT phonepe_merchant_id, phonepe_salt_key FROM restaurants WHERE id = ?',
+        [restaurant.id]
+      );
+      hasMerchant = !!(pp?.phonepe_merchant_id && pp?.phonepe_salt_key);
+    } catch (e) { /* columns not migrated yet */ }
+
+    res.json({ success: true, data: { ...restaurant, hasMerchant, tableUpiOnly } });
   } catch (err) { next(err); }
 });
 
