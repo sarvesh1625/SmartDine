@@ -284,13 +284,14 @@ router.get('/payment-settings', authenticate, isAdmin, async (req, res, next) =>
 // PUT /api/v1/restaurant/payment-settings — save UPI + PhonePe credentials
 router.put('/payment-settings', authenticate, isAdmin, async (req, res, next) => {
   try {
-    const { upi_id, phonepe_merchant_id, phonepe_salt_key, phonepe_salt_index, phonepe_env } = req.body;
+    const { upi_id, pay_first, phonepe_merchant_id, phonepe_salt_key, phonepe_salt_index, phonepe_env } = req.body;
     if (upi_id && !/^[a-zA-Z0-9.\-_]+@[a-zA-Z0-9]+$/.test(upi_id.trim())) {
       return res.status(400).json({ success: false, message: 'Invalid UPI ID format. Example: yourname@ybl' });
     }
     await query(
       `UPDATE restaurants SET
          upi_id              = ?,
+         pay_first           = ?,
          phonepe_merchant_id = ?,
          phonepe_salt_key    = ?,
          phonepe_salt_index  = ?,
@@ -298,6 +299,7 @@ router.put('/payment-settings', authenticate, isAdmin, async (req, res, next) =>
        WHERE id = ?`,
       [
         upi_id              ? upi_id.trim()              : null,
+        pay_first           ? 1                          : 0,
         phonepe_merchant_id ? phonepe_merchant_id.trim() : null,
         phonepe_salt_key    ? phonepe_salt_key.trim()    : null,
         phonepe_salt_index  || 1,

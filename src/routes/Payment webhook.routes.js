@@ -324,6 +324,148 @@ router.patch('/customer-paid/:orderId', async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SMART PAYMENT INIT — Auto-detects gateway (Razorpay / PhonePe / Cashfree)
+// POST /api/v1/webhooks/payment-init
+// Returns: { gateway, keyId, orderId, amount, qrImageUrl, redirectUrl }
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/payment-init', express.json(), async (req, res, next) => {
+  try {
+    const { orderId, bookingId, restaurantId, amount } = req.body;
+    if (!restaurantId || !amount) throw new AppError('restaurantId and amount required', 400);
+
+    const restaurant = await queryOne(
+      `SELECT id, name, upi_id,
+              phonepe_merchant_id, phonepe_salt_key, phonepe_salt_index, phonepe_env,
+              razorpay_key_id, razorpay_key_secret,
+              cashfree_app_id, cashfree_secret, cashfree_env
+       FROM restaurants WHERE id = ?`,
+      [restaurantId]
+    );
+    if (!restaurant) throw new AppError('Restaurant not found', 404);
+
+    const txnId       = (orderId || bookingId || `TXN_${Date.now()}`).slice(0, 36);
+    const amountNum   = Number(amount);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const backendUrl  = process.env.BACKEND_URL  || 'http://localhost:5000';
+
+    // ── 1. Razorpay ──────────────────────────────────────────────────────────
+    const rzpKeyId  = restaurant.razorpay_key_id  || process.env.RAZORPAY_KEY_ID;
+    const rzpSecret = restaurant.razorpay_key_secret || process.env.RAZORPAY_KEY_SECRET;
+    if (rzpKeyId && rzpSecret) {
+      try {
+        const Razorpay = require('razorpay');
+        const rzp = new Razorpay({ key_id: rzpKeyId, key_secret: rzpSecret });
+        const order = await rzp.orders.create({
+          amount:   Math.round(amountNum * 100),
+          currency: 'INR',
+          receipt:  txnId.slice(0, 40),
+          notes:    { order_id: orderId || '', booking_id: bookingId || '', restaurant_id: restaurantId },
+        });
+        // Generate UPI QR for this Razorpay order
+        let qrImageUrl = null;
+        try {
+          const qrRes = await fetch('https://api.razorpay.com/v1/payments/qr-codes', {
+            method: 'POST',
+            headers: {
+              'Content-Type':  'application/json',
+              'Authorization': 'Basic ' + Buffer.from(`${rzpKeyId}:${rzpSecret}`).toString('base64'),
+            },
+            body: JSON.stringify({
+              type: 'upi_qr', name: restaurant.name, usage: 'single_use',
+              fixed_amount: true, payment_amount: Math.round(amountNum * 100),
+              description: `Payment for ${orderId ? 'order' : 'booking'} #${txnId.slice(0,8).toUpperCase()}`,
+              close_by: Math.floor(Date.now() / 1000) + 1800,
+              notes: { order_id: orderId || '', booking_id: bookingId || '' },
+            }),
+          });
+          if (qrRes.ok) { const qd = await qrRes.json(); qrImageUrl = qd.image_url; }
+        } catch {}
+        return res.json({ success: true, data: {
+          gateway: 'razorpay', keyId: rzpKeyId,
+          razorpayOrderId: order.id, amount: amountNum,
+          qrImageUrl, txnId,
+        }});
+      } catch (e) { console.error('Razorpay init failed:', e.message); }
+    }
+
+    // ── 2. PhonePe ───────────────────────────────────────────────────────────
+    if (restaurant.phonepe_merchant_id && restaurant.phonepe_salt_key) {
+      try {
+        const isUAT    = restaurant.phonepe_env !== 'PROD';
+        const baseUrl  = isUAT ? 'https://api-preprod.phonepe.com/apis/pg-sandbox' : 'https://api.phonepe.com/apis/hermes';
+        const payload  = {
+          merchantId: restaurant.phonepe_merchant_id,
+          merchantTransactionId: txnId,
+          merchantUserId: `USER_${txnId.slice(0,20)}`,
+          amount: Math.round(amountNum * 100),
+          redirectUrl: `${frontendUrl}/payment-status/${txnId}`,
+          redirectMode: 'REDIRECT',
+          callbackUrl: `${backendUrl}/api/v1/webhooks/phonepe/${restaurantId}`,
+          paymentInstrument: { type: 'PAY_PAGE' },
+        };
+        const b64     = Buffer.from(JSON.stringify(payload)).toString('base64');
+        const checksum = require('crypto').createHash('sha256').update(b64 + '/pg/v1/pay' + restaurant.phonepe_salt_key).digest('hex') + '###' + (restaurant.phonepe_salt_index || 1);
+        const ppRes   = await fetch(`${baseUrl}/pg/v1/pay`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-VERIFY': checksum, 'X-MERCHANT-ID': restaurant.phonepe_merchant_id },
+          body: JSON.stringify({ request: b64 }),
+        });
+        const ppData = await ppRes.json();
+        if (ppData.success) {
+          return res.json({ success: true, data: {
+            gateway: 'phonepe',
+            redirectUrl: ppData.data?.instrumentResponse?.redirectInfo?.url,
+            amount: amountNum, txnId,
+          }});
+        }
+      } catch (e) { console.error('PhonePe init failed:', e.message); }
+    }
+
+    // ── 3. Cashfree ──────────────────────────────────────────────────────────
+    if (restaurant.cashfree_app_id && restaurant.cashfree_secret) {
+      try {
+        const isTest  = restaurant.cashfree_env !== 'PROD';
+        const baseUrl = isTest ? 'https://sandbox.cashfree.com/pg' : 'https://api.cashfree.com/pg';
+        const cfRes   = await fetch(`${baseUrl}/orders`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-version': '2023-08-01',
+            'x-client-id':     restaurant.cashfree_app_id,
+            'x-client-secret': restaurant.cashfree_secret,
+          },
+          body: JSON.stringify({
+            order_id: txnId, order_amount: amountNum, order_currency: 'INR',
+            customer_details: { customer_id: txnId, customer_phone: '9999999999' },
+            order_meta: {
+              return_url: `${frontendUrl}/payment-status/${txnId}`,
+              notify_url: `${backendUrl}/api/v1/webhooks/cashfree/${restaurantId}`,
+            },
+          }),
+        });
+        const cfData = await cfRes.json();
+        if (cfData.payment_session_id) {
+          return res.json({ success: true, data: {
+            gateway: 'cashfree',
+            sessionId: cfData.payment_session_id,
+            appId: restaurant.cashfree_app_id,
+            environment: restaurant.cashfree_env || 'TEST',
+            amount: amountNum, txnId,
+          }});
+        }
+      } catch (e) { console.error('Cashfree init failed:', e.message); }
+    }
+
+    // ── 4. Fallback: Static UPI QR ────────────────────────────────────────────
+    return res.json({ success: true, data: {
+      gateway: 'static_upi',
+      upiId: restaurant.upi_id,
+      amount: amountNum, txnId,
+    }});
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PHONEPE — Initiate Payment (creates PhonePe payment page/QR)
 // POST /api/v1/webhooks/phonepe-init
 // Called when customer is about to pay — PhonePe returns a redirect URL
@@ -619,6 +761,70 @@ router.patch('/customer-booking-paid/:bookingId', async (req, res, next) => {
 
     res.json({ success: true, message: 'Restaurant notified' });
   } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CASHFREE WEBHOOK
+// POST /api/v1/webhooks/cashfree/:restaurantId
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/cashfree/:restaurantId', express.json(), async (req, res) => {
+  try {
+    const { restaurantId } = req.params;
+    const body = req.body;
+    if (body.type !== 'PAYMENT_SUCCESS_WEBHOOK' && body.data?.payment?.payment_status !== 'SUCCESS') {
+      return res.json({ received: true });
+    }
+    const amount    = Number(body.data?.payment?.payment_amount || 0);
+    const txnId     = body.data?.payment?.cf_payment_id || body.data?.order?.order_id;
+    const orderId   = body.data?.order?.order_id;
+
+    const orders = await query(
+      `SELECT id FROM orders WHERE restaurant_id = ? AND payment_status IN ('pending','customer_confirmed') AND ABS(final_amount - ?) < 5 ORDER BY created_at DESC LIMIT 1`,
+      [restaurantId, amount]
+    );
+    if (orders.length) {
+      await query(`UPDATE orders SET payment_status='paid', payment_method='upi', gateway_payment_id=?, paid_at=NOW() WHERE id=?`, [txnId, orders[0].id]);
+      emitToRestaurant(restaurantId, 'payment_updated', { orderId: orders[0].id, paymentStatus: 'paid', amount });
+      emitToRestaurant(restaurantId, 'new_order', { orderId: orders[0].id });
+    }
+    emitToRestaurant(restaurantId, 'upi_payment_received', { amount, txnId, receivedAt: new Date().toISOString() });
+    res.json({ received: true });
+  } catch (err) { console.error('Cashfree webhook error:', err.message); res.json({ received: true }); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RAZORPAY WEBHOOK — also handles booking payments
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/razorpay', express.json(), async (req, res) => {
+  try {
+    const sig = req.headers['x-razorpay-signature'];
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (sig && secret) {
+      const expected = require('crypto').createHmac('sha256', secret).update(JSON.stringify(req.body)).digest('hex');
+      if (expected !== sig) return res.status(400).json({ error: 'Invalid signature' });
+    }
+    const { event, payload } = req.body;
+    if (!['payment.captured','order.paid','qr_code.closed'].includes(event)) return res.json({ received: true });
+
+    const payment = payload?.payment?.entity || payload?.order?.entity;
+    const amount  = Number(payment?.amount || 0) / 100;
+    const txnId   = payment?.id;
+    const notes   = payment?.notes || {};
+
+    // Booking payment
+    if (notes.booking_id) {
+      const booking = await queryOne('SELECT id, restaurant_id, customer_name, advance_amount, balance_amount FROM bookings WHERE id = ?', [notes.booking_id]);
+      if (booking) {
+        await query(`UPDATE bookings SET payment_status='paid', razorpay_payment_id=?, status='confirmed' WHERE id=?`, [txnId, booking.id]);
+        emitToRestaurant(booking.restaurant_id, 'booking_confirmed', { bookingId: booking.id, customerName: booking.customer_name, advanceAmount: booking.advance_amount, balanceAmount: booking.balance_amount });
+        emitToRestaurant(booking.restaurant_id, 'upi_payment_received', { amount, txnId, bookingId: booking.id, payerName: booking.customer_name });
+      }
+    } else {
+      // Regular order
+      await markOrderPaid(null, payment?.order_id, txnId, 'upi');
+    }
+    res.json({ received: true });
+  } catch (err) { console.error('Razorpay webhook error:', err.message); res.json({ received: true }); }
 });
 
 module.exports = router;
