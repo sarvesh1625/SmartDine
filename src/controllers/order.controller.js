@@ -130,22 +130,24 @@ async function placeOrder(req, res, next) {
 
 async function getOrders(req, res, next) {
   try {
-    const { status, date, page = 1, limit = 20 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const { status, date } = req.query;
+    const pageNum  = Math.max(1, parseInt(req.query.page, 10)  || 1);
+    const limitNum = Math.min(100, parseInt(req.query.limit, 10) || 20);
+    const offsetNum = (pageNum - 1) * limitNum;
+
     let sql = `SELECT o.*, t.table_number FROM orders o
                LEFT JOIN tables_info t ON t.id = o.table_id
                WHERE o.restaurant_id = ?`;
     const params = [req.restaurantId];
     if (status) { sql += ' AND o.status = ?'; params.push(status); }
     if (date)   { sql += ' AND DATE(o.created_at) = ?'; params.push(date); }
-    sql += ' ORDER BY o.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit, 10), parseInt(offset, 10));
+    sql += ' ORDER BY o.created_at DESC LIMIT ' + limitNum + ' OFFSET ' + offsetNum;
 
     const orders = await query(sql, params);
     for (const order of orders) {
       order.items = await query('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
     }
-    res.json({ success: true, data: orders, page: parseInt(page), limit: parseInt(limit) });
+    res.json({ success: true, data: orders, page: pageNum, limit: limitNum });
   } catch (err) { next(err); }
 }
 
