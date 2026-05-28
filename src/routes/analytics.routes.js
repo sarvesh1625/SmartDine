@@ -80,7 +80,7 @@ router.get('/revenue', authenticate, isAdmin, async (req, res, next) => {
 // GET /api/v1/analytics/top-items?limit=10
 router.get('/top-items', authenticate, isAdmin, async (req, res, next) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
     const rows = await query(
       `SELECT
          oi.item_name_snapshot                 AS name,
@@ -93,7 +93,7 @@ router.get('/top-items', authenticate, isAdmin, async (req, res, next) => {
        GROUP BY oi.item_name_snapshot
        ORDER BY total_sold DESC
        LIMIT ?`,
-      [req.restaurantId, limit]
+      [req.restaurantId, parseInt(limit, 10)]
     );
     res.json({ success: true, data: rows });
   } catch (err) { next(err); }

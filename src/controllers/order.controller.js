@@ -139,7 +139,7 @@ async function getOrders(req, res, next) {
     if (status) { sql += ' AND o.status = ?'; params.push(status); }
     if (date)   { sql += ' AND DATE(o.created_at) = ?'; params.push(date); }
     sql += ' ORDER BY o.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), offset);
+    params.push(parseInt(limit, 10), parseInt(offset, 10));
 
     const orders = await query(sql, params);
     for (const order of orders) {
