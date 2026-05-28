@@ -130,7 +130,52 @@ router.get('/stats', authenticate, isSuperAdmin, async (req, res, next) => {
        LIMIT 10`
     );
 
-    res.json({ success: true, data: { stats, recentRestaurants } });
+    res.json({ success: true, data: { ...stats[0], recentRestaurants } });
+  } catch (err) { next(err); }
+});
+
+// GET /api/v1/superadmin/analytics
+router.get('/analytics', authenticate, isSuperAdmin, async (req, res, next) => {
+  try {
+    const [stats] = await query(
+      `SELECT
+         (SELECT COUNT(*) FROM restaurants)                                      AS total_restaurants,
+         (SELECT COUNT(*) FROM restaurants WHERE plan_type != 'free')            AS paid_restaurants,
+         (SELECT COUNT(*) FROM restaurants WHERE plan_type = 'pro')              AS pro_restaurants,
+         (SELECT COUNT(*) FROM restaurants WHERE plan_type = 'enterprise')       AS enterprise_restaurants,
+         (SELECT COUNT(*) FROM restaurants WHERE is_active = 0)                  AS inactive_restaurants,
+         (SELECT COUNT(*) FROM users WHERE role = 'admin')                       AS total_admins,
+         (SELECT COUNT(*) FROM orders WHERE DATE(created_at) = CURDATE())        AS today_orders,
+         (SELECT COALESCE(SUM(final_amount),0) FROM orders
+            WHERE DATE(created_at) = CURDATE() AND status != 'cancelled')        AS today_revenue,
+         (SELECT COALESCE(SUM(final_amount),0) FROM orders
+            WHERE status != 'cancelled')                                          AS total_revenue,
+         (SELECT COUNT(*) FROM orders)                                            AS total_orders`
+    );
+
+    const topRestaurants = await query(
+      `SELECT r.id, r.name, r.slug, r.plan_type, r.city,
+              COUNT(DISTINCT o.id) AS total_orders,
+              COALESCE(SUM(o.final_amount), 0) AS total_revenue
+       FROM restaurants r
+       LEFT JOIN orders o ON o.restaurant_id = r.id AND o.status != 'cancelled'
+       GROUP BY r.id
+       ORDER BY total_revenue DESC
+       LIMIT 10`
+    );
+
+    const revenueByDay = await query(
+      `SELECT DATE(created_at) AS date,
+              COUNT(*) AS orders,
+              COALESCE(SUM(final_amount), 0) AS revenue
+       FROM orders
+       WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+         AND status != 'cancelled'
+       GROUP BY DATE(created_at)
+       ORDER BY date ASC`
+    );
+
+    res.json({ success: true, data: { stats: stats, topRestaurants, revenueByDay } });
   } catch (err) { next(err); }
 });
 
