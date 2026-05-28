@@ -135,4 +135,5 @@ router.put('/platform-settings', authenticate, isSuperAdmin, async (req, res, ne
   } catch (err) { next(err); }
 });
 
+
 module.exports = router;
