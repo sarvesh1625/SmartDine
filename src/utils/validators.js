@@ -40,17 +40,18 @@ const createMenuItemSchema = Joi.object({
   name_hi:               Joi.string().max(120).optional().allow('', null),
   description_en:        Joi.string().max(500).optional().allow('', null),
   description_te:        Joi.string().max(500).optional().allow('', null),
-  price:                 Joi.number().positive().precision(2).required(),
-  discounted_price:      Joi.number().min(0).precision(2).optional().allow(null, 0),
-  image_url:             Joi.string().uri().max(500).optional().allow('', null),
-  is_veg:                Joi.boolean().default(true),
-  preparation_time_mins: Joi.number().integer().min(0).max(180).default(15).allow(null),
+  price:                 Joi.number().positive().required(),
+  discounted_price:      Joi.number().min(0).optional().allow(null, '', 0),
+  image_url:             Joi.string().max(500).optional().allow('', null),
+  is_veg:                Joi.boolean().optional().default(true),
+  is_available:          Joi.boolean().optional().default(true),
+  preparation_time_mins: Joi.number().integer().min(0).max(180).optional().allow(null, 0),
   calories:              Joi.number().integer().min(0).optional().allow(null, 0),
-  tags:                  Joi.array().items(Joi.string().max(30)).optional().allow(null),
+  tags:                  Joi.alternatives().try(Joi.array(), Joi.string()).optional().allow(null),
   is_combo:              Joi.boolean().optional().default(false),
-  combo_items:           Joi.alternatives().try(Joi.array(), Joi.string()).optional().allow(null),
-  combo_savings:         Joi.number().min(0).optional().allow(null),
-});
+  combo_items:           Joi.alternatives().try(Joi.array(), Joi.string()).optional().allow(null, ''),
+  combo_savings:         Joi.number().min(0).optional().allow(null, 0),
+}).options({ allowUnknown: true });
 
 const updateMenuItemSchema = Joi.object({
   category_id:           Joi.number().integer().positive().optional(),
