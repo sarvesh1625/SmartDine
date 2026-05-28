@@ -52,6 +52,26 @@ router.get('/analytics', authenticate, isSuperAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/v1/superadmin/restaurants/:id
+router.get('/restaurants/:id', authenticate, isSuperAdmin, async (req, res, next) => {
+  try {
+    const restaurant = await queryOne(
+      `SELECT r.*,
+              COUNT(DISTINCT u.id) AS staff_count,
+              COUNT(DISTINCT o.id) AS total_orders,
+              COALESCE(SUM(o.final_amount), 0) AS total_revenue
+       FROM restaurants r
+       LEFT JOIN users u ON u.restaurant_id = r.id AND u.role != 'admin'
+       LEFT JOIN orders o ON o.restaurant_id = r.id AND o.status != 'cancelled'
+       WHERE r.id = ?
+       GROUP BY r.id`,
+      [req.params.id]
+    );
+    if (!restaurant) throw new AppError('Restaurant not found', 404);
+    res.json({ success: true, data: restaurant });
+  } catch (err) { next(err); }
+});
+
 // PATCH /api/v1/superadmin/restaurants/:id/plan
 router.patch('/restaurants/:id/plan', authenticate, isSuperAdmin, async (req, res, next) => {
   try {
@@ -134,6 +154,5 @@ router.put('/platform-settings', authenticate, isSuperAdmin, async (req, res, ne
     res.json({ success: true, message: 'Setting updated' });
   } catch (err) { next(err); }
 });
-
 
 module.exports = router;
