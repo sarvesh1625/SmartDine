@@ -1,12 +1,10 @@
 const bcrypt    = require('bcryptjs');
 const jwt       = require('jsonwebtoken');
-const uuid      = require('uuid');           // uuid v13: import the whole module
+const uuid      = require('uuid');
 const { query, queryOne, transaction } = require('../config/db');
-const { cacheSet, cacheGet, cacheDel } = require('../config/redis');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 
-// uuid v13 changed: no longer exports { v4 } — use uuid.v4()
 const uuidv4 = () => uuid.v4();
 
 function generateTokens(user) {
@@ -59,14 +57,11 @@ async function register(req, res, next) {
         [restaurantId]
       );
 
-      // Set 15-day free trial on the restaurant
       await conn.execute(
         `UPDATE restaurants SET trial_ends_at = DATE_ADD(NOW(), INTERVAL 15 DAY) WHERE id = ?`,
         [restaurantId]
       );
 
-      // Auto-create default Takeaway table (Table 1) for every restaurant
-      // QR: /menu/:slug/table/1
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
       await conn.execute(
         `INSERT INTO tables_info (restaurant_id, table_number, label, qr_code_url)
@@ -91,8 +86,9 @@ async function login(req, res, next) {
     const { email, password } = req.body;
 
     const user = await queryOne(
-      `SELECT u.*, r.name AS restaurant_name, r.slug, r.plan_type, r.is_active AS restaurant_active, r.id AS rid,
-       DATE_ADD(r.created_at, INTERVAL 15 DAY) AS trial_ends_at
+      `SELECT u.*, r.name AS restaurant_name, r.slug, r.plan_type,
+              r.is_active AS restaurant_active, r.id AS rid,
+              r.trial_ends_at
        FROM users u
        LEFT JOIN restaurants r ON r.id = u.restaurant_id
        WHERE u.email = ?`,
@@ -108,9 +104,10 @@ async function login(req, res, next) {
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) throw new AppError('Invalid email or password', 401);
 
-    // Calculate trial status
-    const trialEndsAt  = user.trial_ends_at;
-    const trialDaysLeft = trialEndsAt ? Math.max(0, Math.ceil((new Date(trialEndsAt) - new Date()) / (1000*60*60*24))) : 0;
+    const trialEndsAt   = user.trial_ends_at;
+    const trialDaysLeft = trialEndsAt
+      ? Math.max(0, Math.ceil((new Date(trialEndsAt) - new Date()) / (1000 * 60 * 60 * 24)))
+      : 0;
     const isTrialActive = trialDaysLeft > 0;
     const planType      = user.plan_type || 'free';
     const hasAccess     = planType !== 'free' || isTrialActive;
@@ -121,7 +118,14 @@ async function login(req, res, next) {
       isTrialActive,
       hasAccess,
     });
-    await cacheSet(`refresh:${user.id}`, refreshToken, 7 * 24 * 60 * 60);
+
+    // Store refresh token in DB — survives server restarts
+    await query('DELETE FROM refresh_tokens WHERE user_id = ?', [user.id]);
+    await query(
+      `INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+       VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 7 DAY))`,
+      [user.id, refreshToken]
+    );
 
     res.json({
       success: true,
@@ -151,8 +155,16 @@ async function refreshToken(req, res, next) {
     if (!token) throw new AppError('Refresh token required', 400);
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const stored  = await cacheGet(`refresh:${decoded.userId}`);
-    if (stored !== token) throw new AppError('Invalid or expired refresh token', 401);
+
+    // Check token in DB instead of cache
+    const stored = await queryOne(
+      `SELECT token_hash FROM refresh_tokens
+       WHERE user_id = ? AND expires_at > NOW()`,
+      [decoded.userId]
+    );
+    if (!stored || stored.token_hash !== token) {
+      throw new AppError('Invalid or expired refresh token', 401);
+    }
 
     const user = await queryOne(
       'SELECT id, restaurant_id, role, is_active FROM users WHERE id = ?',
@@ -161,7 +173,14 @@ async function refreshToken(req, res, next) {
     if (!user || !user.is_active) throw new AppError('User not found', 401);
 
     const { accessToken, refreshToken: newRefresh } = generateTokens(user);
-    await cacheSet(`refresh:${user.id}`, newRefresh, 7 * 24 * 60 * 60);
+
+    // Rotate refresh token in DB
+    await query('DELETE FROM refresh_tokens WHERE user_id = ?', [user.id]);
+    await query(
+      `INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+       VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 7 DAY))`,
+      [user.id, newRefresh]
+    );
 
     res.json({ success: true, data: { accessToken, refreshToken: newRefresh } });
   } catch (err) {
@@ -171,7 +190,7 @@ async function refreshToken(req, res, next) {
 
 async function logout(req, res, next) {
   try {
-    await cacheDel(`refresh:${req.user.id}`);
+    await query('DELETE FROM refresh_tokens WHERE user_id = ?', [req.user.id]);
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (err) {
     next(err);
@@ -198,13 +217,18 @@ async function getMe(req, res, next) {
 async function changePassword(req, res, next) {
   try {
     const { currentPassword, newPassword } = req.body;
-    const user = await queryOne('SELECT id, password_hash FROM users WHERE id = ?', [req.user.id]);
+    const user = await queryOne(
+      'SELECT id, password_hash FROM users WHERE id = ?',
+      [req.user.id]
+    );
     const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
     if (!isMatch) throw new AppError('Current password is incorrect', 400);
 
     const newHash = await bcrypt.hash(newPassword, 12);
     await query('UPDATE users SET password_hash = ? WHERE id = ?', [newHash, req.user.id]);
-    await cacheDel(`refresh:${req.user.id}`);
+
+    // Invalidate refresh token on password change
+    await query('DELETE FROM refresh_tokens WHERE user_id = ?', [req.user.id]);
 
     res.json({ success: true, message: 'Password changed successfully. Please login again.' });
   } catch (err) {
