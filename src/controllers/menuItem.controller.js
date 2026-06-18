@@ -31,7 +31,7 @@ async function getPublicMenu(req, res, next) {
               description_en, description_te, price, discounted_price,
               image_url, is_veg, is_available, preparation_time_mins, calories, tags,
               is_combo, combo_items, combo_savings
-       FROM menu_items WHERE restaurant_id = ? AND is_available = 1
+       FROM menu_items WHERE restaurant_id = ?
        ORDER BY sort_order ASC, id ASC`,
       [restaurant.id]
     );
