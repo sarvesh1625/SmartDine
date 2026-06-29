@@ -102,3 +102,15 @@ async function start() {
 start();
 
 module.exports = { app, server };
+
+// Prevent Render free tier cold starts — ping every 14 minutes
+if (process.env.NODE_ENV === 'production') {
+  setInterval(async () => {
+    try {
+      await fetch(`${process.env.BACKEND_URL || 'https://suvidha-backend.onrender.com'}/health`);
+      logger.info('Keep-alive ping');
+    } catch {}
+  }, 14 * 60 * 1000);
+}
+
+start();
