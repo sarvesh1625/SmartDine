@@ -13,7 +13,6 @@ const { errorHandler }    = require('./middleware/errorHandler');
 const { notFound }        = require('./middleware/notFound');
 const logger              = require('./utils/logger');
 
-// ── Routes — filenames use dots (auth.routes.js), not underscores ─────────────
 const authRoutes       = require('./routes/auth.routes');
 const restaurantRoutes = require('./routes/restaurant.routes');
 const categoryRoutes   = require('./routes/category.routes');
@@ -28,9 +27,11 @@ const billingRoutes    = require('./routes/billing.routes');
 const bookingRoutes    = require('./routes/booking.routes');
 const webhookRoutes    = require('./routes/payment_webhook.routes');
 
-
 const app    = express();
 const server = http.createServer(app);
+
+// Trust Render's proxy — required for rate limiter to work correctly
+app.set('trust proxy', 1);
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(helmet());
@@ -40,7 +41,7 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(morgan('dev'));   // HTTP request logging in terminal
+app.use(morgan('dev'));
 
 // Global rate limiter
 app.use(rateLimit({
@@ -51,7 +52,7 @@ app.use(rateLimit({
   message: { success: false, message: 'Too many requests, please try again later.' },
 }));
 
-// Auth rate limiter — relaxed for development
+// Auth rate limiter
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: process.env.NODE_ENV === 'production' ? 20 : 100,
@@ -64,7 +65,7 @@ app.get('/health', (req, res) => res.json({ success: true, status: 'ok', timesta
 
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/v1/auth',       authLimiter, authRoutes);
-app.use('/api/v1/bookings',    bookingRoutes);
+app.use('/api/v1/bookings',   bookingRoutes);
 app.use('/api/v1/restaurant', restaurantRoutes);
 app.use('/api/v1/categories', categoryRoutes);
 app.use('/api/v1/menu-items', menuItemRoutes);
@@ -92,7 +93,20 @@ async function start() {
     initSocket(server);
 
     const PORT = process.env.PORT || 5000;
-    server.listen(PORT, () => logger.info(`MenuCloud API running on port ${PORT}`));
+    server.listen(PORT, () => {
+      logger.info(`MenuCloud API running on port ${PORT}`);
+
+      // Keep Render server warm — ping every 14 min to prevent cold starts
+      if (process.env.NODE_ENV === 'production') {
+        setInterval(async () => {
+          try {
+            const url = process.env.BACKEND_URL || 'https://suvidha-backend.onrender.com';
+            await fetch(`${url}/health`);
+            logger.info('Keep-alive ping sent');
+          } catch {}
+        }, 14 * 60 * 1000);
+      }
+    });
   } catch (err) {
     logger.error('Failed to start server:', err);
     process.exit(1);
@@ -102,15 +116,3 @@ async function start() {
 start();
 
 module.exports = { app, server };
-
-// Prevent Render free tier cold starts — ping every 14 minutes
-if (process.env.NODE_ENV === 'production') {
-  setInterval(async () => {
-    try {
-      await fetch(`${process.env.BACKEND_URL || 'https://suvidha-backend.onrender.com'}/health`);
-      logger.info('Keep-alive ping');
-    } catch {}
-  }, 14 * 60 * 1000);
-}
-
-start();
