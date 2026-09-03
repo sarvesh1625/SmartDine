@@ -7,8 +7,8 @@ const { AppError }              = require('../middleware/errorHandler');
 const logger                    = require('../utils/logger');
 
 const PLANS = {
-  pro:        { amount: 99900,  label: 'Pro',        period_days: 30  },
-  enterprise: { amount: 299900, label: 'Enterprise',  period_days: 30  },
+  pro:        { amount: 49900,  label: 'Pro',        period_days: 30  },
+  enterprise: { amount: 169900, label: 'Enterprise',  period_days: 30  },
 };
 
 const razorpay = process.env.RAZORPAY_KEY_ID ? new Razorpay({
