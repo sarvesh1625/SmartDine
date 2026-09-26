@@ -13,7 +13,8 @@ router.post('/verify-widget-token', async (req, res, next) => {
     const { token } = req.body;
     if (!token) throw new AppError('Verification token is required', 400);
 
-    const authkey = process.env.MSG91_AUTH_KEY;
+    // const authkey = process.env.MSG91_AUTH_KEY;
+    const authkey = process.env.MSG91_AUTH_KEY || '575307Adi1z2w6Wz6ab7706eP1';
     if (!authkey) throw new AppError('OTP service not configured', 503);
 
     const response = await fetch('https://control.msg91.com/api/v5/widget/verifyAccessToken', {
