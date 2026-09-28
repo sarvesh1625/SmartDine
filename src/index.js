@@ -27,6 +27,7 @@ const billingRoutes    = require('./routes/billing.routes');
 const bookingRoutes    = require('./routes/booking.routes');
 const webhookRoutes    = require('./routes/payment_webhook.routes');
 const otpRoutes = require('./routes/otp.routes');
+const menuImportRoutes = require('./routes/menuImport.routes');
 
 
 const app    = express();
@@ -80,6 +81,7 @@ app.use('/api/v1/superadmin', superAdminRoutes);
 app.use('/api/v1/billing',    billingRoutes);
 app.use('/api/v1/webhooks',   webhookRoutes);
 app.use('/api/v1/auth', authLimiter, otpRoutes);
+app.use('/api/v1/menu-import', menuImportRoutes);
 
 // ── 404 & error handling ──────────────────────────────────────────────────────
 app.use(notFound);
