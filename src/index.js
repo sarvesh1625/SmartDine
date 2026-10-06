@@ -28,7 +28,7 @@ const bookingRoutes    = require('./routes/booking.routes');
 const webhookRoutes    = require('./routes/payment_webhook.routes');
 const otpRoutes = require('./routes/otp.routes');
 const menuImportRoutes = require('./routes/menuImport.routes');
-
+const { startSubscriptionExpiryJob } = require('./utils/subscriptionExpiry');
 
 const app    = express();
 const server = http.createServer(app);
@@ -98,8 +98,13 @@ async function start() {
     initSocket(server);
 
     const PORT = process.env.PORT || 5000;
-    server.listen(PORT, () => {
-      logger.info(`MenuCloud API running on port ${PORT}`);
+    // server.listen(PORT, () => {
+    //   logger.info(`MenuCloud API running on port ${PORT}`);
+
+      server.listen(PORT, () => {
+  logger.info(`MenuCloud API running on port ${PORT}`);
+  startSubscriptionExpiryJob();
+});
 
       // Keep Render server warm — ping every 14 min to prevent cold starts
       if (process.env.NODE_ENV === 'production') {
