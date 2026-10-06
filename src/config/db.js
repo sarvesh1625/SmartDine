@@ -13,7 +13,10 @@ async function connectDB() {
     waitForConnections: true,
     connectionLimit:    20,
     queueLimit:         0,
-    timezone:           '+05:30',
+    // MySQL's CURRENT_TIMESTAMP / NOW() store UTC. Read them as UTC ('Z') — the browser
+    // then shows them in the viewer's own time (IST in India). '+05:30' here made every
+    // time appear 5 h 30 min earlier than it really was.
+    timezone:           'Z',
     charset:            'utf8mb4',
   });
 
