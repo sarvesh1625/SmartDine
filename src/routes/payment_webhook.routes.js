@@ -281,19 +281,48 @@ router.patch('/manual-paid/:orderId',
   async (req, res) => {
     try {
       const { orderId } = req.params;
-      await query(
-        `UPDATE orders
-         SET payment_status = 'paid', paid_at = NOW()
-         WHERE id = ? AND restaurant_id = ?`,
+
+      // Only this restaurant's own orders
+      const order = await queryOne(
+        `SELECT id, status, payment_status, payment_method, customer_name, final_amount
+         FROM orders WHERE id = ? AND restaurant_id = ?`,
         [orderId, req.restaurantId]
       );
+      if (!order) return res.status(404).json({ error: 'Order not found' });
 
-      // Emit to admin panel
+      // "Require payment before order": the order is held as payment_pending and the kitchen
+      // must not see it until it is paid. Marking it paid releases it (payment_pending -> placed).
+      const wasHeld = order.status === 'payment_pending';
+
+      if (order.payment_status === 'paid' && !wasHeld) {
+        return res.json({ success: true, message: 'Payment confirmed' });   // nothing to change
+      }
+
+      await query(
+        `UPDATE orders
+         SET payment_status = 'paid', paid_at = NOW(),
+             status = CASE WHEN status = 'payment_pending' THEN 'placed' ELSE status END
+         WHERE id = ? AND restaurant_id = ?`,
+        [order.id, req.restaurantId]
+      );
+
+      // Tell the admin screen the order is paid
       emitToRestaurant(req.restaurantId, 'payment_updated', {
-        orderId,
+        orderId:       order.id,
         paymentStatus: 'paid',
-        paidAt: new Date().toISOString(),
+        paidAt:        new Date().toISOString(),
       });
+
+      // ...and only if it was being held, tell the kitchen there is a new order to cook
+      if (wasHeld) {
+        emitToRestaurant(req.restaurantId, 'new_order', {
+          orderId:       order.id,
+          customerName:  order.customer_name,
+          amount:        order.final_amount,
+          paymentMethod: order.payment_method,
+          status:        'placed',
+        });
+      }
 
       res.json({ success: true, message: 'Payment confirmed' });
     } catch (err) {
