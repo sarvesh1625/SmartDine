@@ -9,6 +9,14 @@ const { query, queryOne } = require('../config/db');
 const { emitToRestaurant, emitNewOrder, emitOrderUpdate } = require('../socket');
 const { AppError } = require('../middleware/errorHandler');
 
+// PhonePe allows a transaction id of at most 34 characters (letters, digits, _ and -).
+// Our order/booking ids are 36-character UUIDs, so we send the UUID without its dashes
+// (32 characters) and put the dashes back when PhonePe calls us.
+const toTxnId   = (uuid) => String(uuid).replace(/-/g, '');
+const fromTxnId = (txn) => /^[0-9a-f]{32}$/i.test(txn)
+  ? `${txn.slice(0, 8)}-${txn.slice(8, 12)}-${txn.slice(12, 16)}-${txn.slice(16, 20)}-${txn.slice(20)}`
+  : txn;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER — mark order as paid and notify admin via socket
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,13 +83,27 @@ router.post('/razorpay',
       const signature  = req.headers['x-razorpay-signature'];
       const secret     = process.env.RAZORPAY_WEBHOOK_SECRET;
 
+      if (!secret) {
+        console.error('Razorpay webhook: RAZORPAY_WEBHOOK_SECRET is not set');
+        return res.status(503).json({ error: 'Webhook not configured' });
+      }
+      if (!Buffer.isBuffer(req.body)) {
+        // index.js must mount express.raw() for this path BEFORE express.json()
+        console.error('Razorpay webhook: body was already parsed — raw body is required for the signature');
+        return res.status(500).json({ error: 'Webhook body misconfigured' });
+      }
+
       // Verify signature
       const expectedSig = crypto
         .createHmac('sha256', secret)
         .update(req.body)
         .digest('hex');
 
-      if (signature !== expectedSig) {
+      const sigOk = typeof signature === 'string' &&
+        signature.length === expectedSig.length &&
+        crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig));
+
+      if (!sigOk) {
         console.error('Razorpay: invalid webhook signature');
         return res.status(400).json({ error: 'Invalid signature' });
       }
@@ -329,20 +351,39 @@ router.patch('/customer-paid/:orderId', async (req, res, next) => {
 // Called when customer is about to pay — PhonePe returns a redirect URL
 // Customer pays on PhonePe page → webhook auto-fires → order confirmed
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/phonepe-init', express.json(), async (req, res, next) => {
+router.post(['/phonepe-init', '/payment-init'], express.json(), async (req, res, next) => {
   try {
-    const { orderId, bookingId, restaurantId, amount } = req.body;
-    if (!restaurantId || !amount) throw new AppError('restaurantId and amount required', 400);
+    const { orderId, bookingId, restaurantId } = req.body || {};
+    if (!restaurantId || (!orderId && !bookingId)) {
+      throw new AppError('restaurantId and orderId (or bookingId) are required', 400);
+    }
 
     // Get restaurant PhonePe credentials
     const restaurant = await queryOne(
-      `SELECT id, name, phonepe_merchant_id, phonepe_salt_key, phonepe_salt_index, phonepe_env
+      `SELECT id, name, slug, phonepe_merchant_id, phonepe_salt_key, phonepe_salt_index, phonepe_env
        FROM restaurants WHERE id = ?`,
       [restaurantId]
     );
-
     if (!restaurant?.phonepe_merchant_id || !restaurant?.phonepe_salt_key) {
       return res.status(503).json({ success: false, message: 'PhonePe not configured for this restaurant' });
+    }
+
+    // The amount comes from OUR database, never from the browser
+    let amount, recordId, returnPath;
+    if (orderId) {
+      const order = await queryOne(
+        'SELECT id, final_amount FROM orders WHERE id = ? AND restaurant_id = ?', [orderId, restaurantId]
+      );
+      if (!order) throw new AppError('Order not found', 404);
+      amount = Number(order.final_amount); recordId = order.id;
+      returnPath = `/order/${restaurant.slug}/${order.id}`;
+    } else {
+      const booking = await queryOne(
+        'SELECT id, advance_amount FROM bookings WHERE id = ? AND restaurant_id = ?', [bookingId, restaurantId]
+      );
+      if (!booking) throw new AppError('Booking not found', 404);
+      amount = Number(booking.advance_amount); recordId = booking.id;
+      returnPath = `/booking/${booking.id}`;
     }
 
     const isUAT       = restaurant.phonepe_env !== 'PROD';
@@ -352,8 +393,8 @@ router.post('/phonepe-init', express.json(), async (req, res, next) => {
     const merchantId  = restaurant.phonepe_merchant_id;
     const saltKey     = restaurant.phonepe_salt_key;
     const saltIndex   = restaurant.phonepe_salt_index || 1;
-    const txnId       = orderId || bookingId || `TXN_${Date.now()}`;
-    const amountPaise = Math.round(Number(amount) * 100); // convert to paise
+    const txnId       = toTxnId(recordId);                    // 32 chars, PhonePe limit is 34
+    const amountPaise = Math.round(amount * 100);
 
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     const backendUrl  = process.env.BACKEND_URL  || 'http://localhost:5000';
@@ -361,16 +402,16 @@ router.post('/phonepe-init', express.json(), async (req, res, next) => {
     const payload = {
       merchantId,
       merchantTransactionId: txnId,
-      merchantUserId:        `USER_${txnId}`,
+      merchantUserId:        `U${txnId}`,                     // 33 chars, PhonePe limit is 35
       amount:                amountPaise,
-      redirectUrl:           `${frontendUrl}/payment-status/${txnId}`,
+      redirectUrl:           `${frontendUrl}${returnPath}`,   // customer lands back on their order page
       redirectMode:          'REDIRECT',
       callbackUrl:           `${backendUrl}/api/v1/webhooks/phonepe/${restaurantId}`,
       paymentInstrument:     { type: 'PAY_PAGE' },
     };
 
     const base64Payload = Buffer.from(JSON.stringify(payload)).toString('base64');
-    const checksum = require('crypto')
+    const checksum = crypto
       .createHash('sha256')
       .update(base64Payload + '/pg/v1/pay' + saltKey)
       .digest('hex') + '###' + saltIndex;
@@ -405,71 +446,89 @@ router.post('/phonepe-init', express.json(), async (req, res, next) => {
 router.post('/phonepe/:restaurantId', express.json(), async (req, res) => {
   try {
     const { restaurantId } = req.params;
-    const { response }     = req.body; // PhonePe sends base64 encoded response
+    const { response }     = req.body || {};   // PhonePe sends the result base64-encoded
+    const xVerify          = req.headers['x-verify'];
 
-    // Get restaurant's PhonePe credentials
+    // A genuine PhonePe callback always carries both. Anything else is rejected.
+    if (!response || !xVerify) return res.status(400).json({ error: 'Missing signature' });
+
     const restaurant = await queryOne(
-      `SELECT id, name, phonepe_salt_key, phonepe_salt_index, phonepe_merchant_id, phonepe_env
+      `SELECT id, name, phonepe_salt_key, phonepe_salt_index, phonepe_merchant_id
        FROM restaurants WHERE id = ?`,
       [restaurantId]
     );
-
     if (!restaurant || !restaurant.phonepe_salt_key) {
       console.log(`PhonePe: restaurant ${restaurantId} not configured`);
       return res.json({ received: true });
     }
 
-    // Verify PhonePe signature
-    const crypto = require('crypto');
-    const xVerify = req.headers['x-verify'];
-    if (xVerify && response) {
-      const expectedHash = crypto
-        .createHash('sha256')
-        .update(response + '/pg/v1/status' + restaurant.phonepe_salt_key)
-        .digest('hex') + '###' + restaurant.phonepe_salt_index;
+    // PhonePe signs callbacks as:  SHA256(base64response + saltKey) + ### + saltIndex
+    const expected = crypto
+      .createHash('sha256')
+      .update(response + restaurant.phonepe_salt_key)
+      .digest('hex') + '###' + (restaurant.phonepe_salt_index || 1);
 
-      if (xVerify !== expectedHash) {
-        console.error('PhonePe: invalid signature');
-        return res.status(400).json({ error: 'Invalid signature' });
-      }
+    const a = Buffer.from(String(xVerify));
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      console.error('PhonePe: invalid callback signature');
+      return res.status(400).json({ error: 'Invalid signature' });
     }
 
-    // Decode and parse response
     const decoded = JSON.parse(Buffer.from(response, 'base64').toString('utf-8'));
     const { code, data } = decoded;
 
     if (code === 'PAYMENT_SUCCESS' && data) {
-      const amount       = Number(data.amount) / 100; // paise to rupees
-      const merchantTxnId = data.merchantTransactionId || data.transactionId;
-      const payerPhone   = data.payerInfo?.phoneNumber;
-
-      // Try to find matching order
-      const orders = await query(
-        `SELECT id FROM orders
-         WHERE restaurant_id = ?
-           AND payment_status IN ('pending','customer_confirmed')
-           AND ABS(final_amount - ?) < 5
-         ORDER BY created_at DESC LIMIT 1`,
-        [restaurantId, amount]
-      );
-
-      if (orders.length) {
-        await query(
-          `UPDATE orders SET payment_status='paid', payment_method='upi',
-           gateway_payment_id=?, paid_at=NOW() WHERE id=?`,
-          [merchantTxnId, orders[0].id]
-        );
-        emitToRestaurant(restaurantId, 'payment_updated', {
-          orderId: orders[0].id, paymentStatus: 'paid',
-          paymentMethod: 'upi', amount,
-        });
-        emitToRestaurant(restaurantId, 'new_order', { orderId: orders[0].id });
+      if (data.merchantId && data.merchantId !== restaurant.phonepe_merchant_id) {
+        console.error('PhonePe: callback is for a different merchant — ignored');
+        return res.json({ received: true });
       }
 
-      // Always emit soundbox notification
+      const paidPaise     = Number(data.amount);
+      const amount        = paidPaise / 100;
+      const merchantTxnId = data.merchantTransactionId || data.transactionId;
+      const recordId      = fromTxnId(merchantTxnId);
+      let matchedOrderId  = null;
+
+      // Find the exact order this payment was made for — never guess by amount
+      const order = await queryOne(
+        'SELECT id, final_amount, payment_status FROM orders WHERE id = ? AND restaurant_id = ?',
+        [recordId, restaurantId]
+      );
+      if (order) {
+        if (Math.round(Number(order.final_amount) * 100) !== paidPaise) {
+          console.error(`PhonePe: amount mismatch on order ${order.id} (paid ${paidPaise}p, expected ${Math.round(Number(order.final_amount) * 100)}p) — NOT marked paid`);
+        } else {
+          matchedOrderId = order.id;
+          if (order.payment_status !== 'paid') {
+            await markOrderPaid(order.id, merchantTxnId, data.transactionId || merchantTxnId, 'upi');
+          }
+        }
+      } else {
+        // Not an order — maybe a booking advance
+        const booking = await queryOne(
+          'SELECT id, customer_name, advance_amount, balance_amount, payment_status FROM bookings WHERE id = ? AND restaurant_id = ?',
+          [recordId, restaurantId]
+        );
+        if (booking && Math.round(Number(booking.advance_amount) * 100) === paidPaise && booking.payment_status !== 'paid') {
+          await query(
+            `UPDATE bookings SET payment_status = 'paid', status = 'confirmed' WHERE id = ?`, [booking.id]
+          );
+          emitToRestaurant(restaurantId, 'booking_confirmed', {
+            bookingId: booking.id, customerName: booking.customer_name,
+            advanceAmount: booking.advance_amount, balanceAmount: booking.balance_amount,
+            paymentMethod: 'upi',
+            message: `Booking confirmed! ${booking.customer_name} paid ₹${booking.advance_amount} via PhonePe`,
+          });
+        } else if (!booking) {
+          console.error(`PhonePe: payment ${merchantTxnId} matches no order or booking at restaurant ${restaurantId}`);
+        }
+      }
+
+      // Soundbox-style alert for the restaurant
       emitToRestaurant(restaurantId, 'upi_payment_received', {
-        amount, payerPhone, txnId: merchantTxnId,
-        orderId: orders[0]?.id || null,
+        amount, payerPhone: data.payerInfo?.phoneNumber, txnId: merchantTxnId,
+        orderId: matchedOrderId,
         receivedAt: new Date().toISOString(),
       });
 

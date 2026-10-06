@@ -41,6 +41,9 @@ app.use(cors({
   origin:      process.env.FRONTEND_URL || '*',
   credentials: true,
 }));
+// Razorpay signs the exact bytes it sends, so its webhook must be read RAW —
+// this has to come before express.json(), which would otherwise consume the body.
+app.use('/api/v1/webhooks/razorpay', express.raw({ type: 'application/json', limit: '1mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));   // HTTP request logging in terminal
